@@ -4,6 +4,8 @@ import gymnasium as gym
 from gymnasium import spaces
 from pandas import to_datetime
 
+import utils
+
 
 class DJSPEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
@@ -15,9 +17,10 @@ class DJSPEnv(gym.Env):
         self.n_machines = 0
         self.aircraft = []  # list of dictionaries containing relevant flight information
         self.parallel_mask = np.empty(shape=(1, 1), dtype=bool)
-        self.assignment = []
-        self.availability = []
-        self.operation_times = []
+        self.assignment = np.empty(shape=(1, 1), dtype=bool)
+        self.availability = np.empty(shape=(1, 1), dtype=bool)
+        self.operation_times = np.empty(shape=(1, 1), dtype=dict)
+        self.time_conflicts = np.empty(shape=(1, 1), dtype=bool)
 
         # load instance and initialise relevant matrices
         if instance_path:
@@ -108,25 +111,51 @@ class DJSPEnv(gym.Env):
 
     def _init_operation_times(self):
         """
-        Performs initial time operations and generates a time conflict matrix for all operations.
+        Initialises the operation times dict-arrays containing earliest start & end and scheduled start & end times
         """
         self.operation_times = np.empty(shape=(self.n_aircraft, self.n_operations), dtype=dict)
         for aircraft in range(0, self.n_aircraft):
-            eta = self.aircraft[aircraft]['ETA']
             for operation in range(0, self.n_operations):
-                # identify preceding operations - if the current operation index < preceding index, automtically
-                # calculate earliest time
-                for i in range(0, self.n_operations):
-                    if i == operation:
-                        continue
-                    else:
-                        if self.parallel_mask[i, operation] and not self.parallel_mask[operation, i]:
+                # check that earliest times have not already been calculated by a successive operative
+                if self.operation_times[aircraft, operation]:
+                    continue
+                start, end = self.earliest_times(operation, aircraft)
+                self.operation_times[aircraft, operation] = {'Earliest Start': start, 'Earliest End': end,
+                                                             'Scheduled Start': None, 'Scheduled End': None}
 
+    def _init_time_conflicts(self):
+        self.time_conflicts = np.empty(shape=(self.n_aircraft, self.n_operations), dtype=bool)
 
+    def earliest_times(self, op_idx, ac_idx):
+        """
+        Gathers earliest start from precedence function and uses it to calculate the earliest end time for an operation
+        """
+        earliest_start = self.precedence(op_idx, ac_idx)
+        earliest_end = earliest_start + Timedelta(minutes=self.aircraft[ac_idx]['Processing Times'][op_idx])
+        return earliest_start, earliest_end
 
+    def precedence(self, op_idx, ac_idx):
+        """
+        Identifies operations preceding op_idx and returns the earliest end time of that operation, which is also the
+        earliest start time of the successive operation.
+        """
+        # identify potential preceding operations - where the column [:,op] for operation is True, return None if empty
+        precedence_idxs = np.where(self.parallel_mask[:, op_idx])[0]
 
-                earliest_start = self.aircraft[aircraft]['ETA'] + Time
-                self.operation_times[aircraft, operation] = {}
+        # aircraft ETA is the earliest start time with no preceding ops
+        if precedence_idxs.size == 0:
+            return self.aircraft[ac_idx]['ETA']
+
+        else:
+            # check that the operation is not a parallel task (parallel when [op,idx]==1 and [idx,op]==1)
+            for idx, preceding_op in enumerate(precedence_idxs):
+                if not self.parallel_mask[op_idx, idx]:
+                    if not self.operation_times[ac_idx, op_idx]:
+                        # calculate earliest start and end times for the preceding operation
+                        prec_start, prec_end = self.earliest_times(idx, ac_idx)
+                        self.operation_times[ac_idx, idx] = {'Earliest Start': prec_start, 'Earliest End': prec_end,
+                                                                     'Scheduled Start': None, 'Scheduled End': None}
+                    return self.operation_times[ac_idx, idx]['Earliest Start']
 
     def convert_action_to_assignment(self, action_index):
         """
