@@ -123,8 +123,26 @@ class DJSPEnv(gym.Env):
                 self.operation_times[aircraft, operation] = {'Earliest Start': start, 'Earliest End': end,
                                                              'Scheduled Start': None, 'Scheduled End': None}
 
+        # use operation times to initialise time conflict matrix
+        self._init_time_conflicts()
+
     def _init_time_conflicts(self):
-        self.time_conflicts = np.empty(shape=(self.n_aircraft, self.n_operations), dtype=bool)
+        """
+        Per operation, a [n_aircraft x n_aircraft]-matrix is created showing which operations from aircraft are in
+        temporal conflict with one another. This is done per operation type, so conflict between operations of
+        different types are not considered.
+        :return:
+        """
+        self.time_conflicts = np.empty(shape=(self.n_operations, self.n_aircraft, self.n_aircraft), dtype=bool)
+        for op in range(0, self.n_operations):
+            for a1 in range(0, self.n_aircraft):
+                for a2 in range(0, self.n_aircraft):
+                    if a1 == a2:
+                        self.time_conflicts[op, a1, a2] = 1
+                    else:
+                        if self.operation_times[a1, op]['Earliest Start'] >= self.operation_times[a2, op]['Earliest End'] and \
+                           self.operation_times[a2, op]['Earliest Start'] <= self.operation_times[a1, op]['Earliest End']:
+                            self.time_conflicts[op, a1, a2] = 1
 
     def earliest_times(self, op_idx, ac_idx):
         """
@@ -170,8 +188,27 @@ class DJSPEnv(gym.Env):
         return aircraft_index, operation_index, machine_index
 
     def update_assignment(self, action):
+        """
+        Updates assignment for a given action and write scheduled time into operation_times.
+        Machine availability is also adjusted.
+        """
         aircraft_index, operation_index, machine_index = self.convert_action_to_assignment(action)
         self.assignment[aircraft_index, operation_index, machine_index] = 1
+        self.update_availability(aircraft_index, operation_index, machine_index)
+        self.update_operation_times(aircraft_index, operation_index)
 
-    def update_availability(self, action):
-        x = 5
+    def update_availability(self, ac_index, op_index, mach_index):
+        """
+        For a sampled action, the availability matrix is adjusted to show the machine at mach_index as unavailable for
+        all aircraft whose operation op_index coincides with the operation chosen.
+        """
+        conflict_aircraft_idxs = np.where(self.time_conflicts[op_index, ac_index, :])[0]
+        for aircraft_idx in conflict_aircraft_idxs:
+            self.availability[aircraft_idx, op_index, mach_index] = 0
+
+    def update_operation_times(self, ac_index, op_index):
+        """
+        Updates the scheduled start and end times.
+        """
+        self.operation_times[ac_index, op_index]['Scheduled Start'] = self.operation_times[ac_index, op_index]['Earliest Start']
+        self.operation_times[ac_index, op_index]['Scheduled End'] = self.operation_times[ac_index, op_index]['Earliest End']
