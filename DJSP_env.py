@@ -1,13 +1,17 @@
 import numpy as np
 from pandas import to_datetime, Timedelta
 import gymnasium as gym
-from gymnasium import spaces
+from gymnasium.spaces import Box, Discrete, Dict, MultiBinary, MultiDiscrete
 from pandas import to_datetime
 
 import utils
 
 
 class DJSPEnv(gym.Env):
+    """
+    An operation scheduling environment for OpenAI gym, developed specifically for the scheduling of ground handling
+    equipment to aircraft. Capable of considering parallel processes.
+    """
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
     def __init__(self, render_mode=None, instance_path=None):
@@ -15,12 +19,13 @@ class DJSPEnv(gym.Env):
         self.n_operations = 0
         self.machines_per_op = []
         self.n_machines = 0
-        self.aircraft = []  # list of dictionaries containing relevant flight information
+        self.aircraft = [{}]  # list of dictionaries containing relevant flight information
         self.parallel_mask = np.empty(shape=(1, 1), dtype=bool)
         self.assignment = np.empty(shape=(1, 1), dtype=bool)
         self.availability = np.empty(shape=(1, 1), dtype=bool)
         self.operation_times = np.empty(shape=(1, 1), dtype=dict)
         self.time_conflicts = np.empty(shape=(1, 1), dtype=bool)
+        self.current_observation = {}
 
         # load instance and initialise relevant matrices
         if instance_path:
@@ -29,9 +34,72 @@ class DJSPEnv(gym.Env):
         self._init_assignment()
         self._init_operation_times()
 
+        # save empty matrices for easy environment resetting
+        self.init_assignment = self.assignment
+        self.init_availability = self.availability
+        self.init_operation_times = self.operation_times
+
         # initialise action and observation space
         self._init_actionspace()
         self._init_observationspace()
+
+    def reset(self):
+        """
+        Returns the observation of the initial state and resets the environment to the initial state so that a new
+        episode (independent of previous ones) may start.
+        """
+        # Reset assignment, availability and operation time matrices
+        self.assignment = self.init_assignment
+        self.availability = self.init_availability
+        self.operation_times = self.init_operation_times
+
+        # reset observation space
+        initial_observation = {
+            'assignment matrix': self.init_assignment,
+            'availability matrix': self.init_availability,
+            'unassigned operations': self.n_operations
+        }
+        return initial_observation
+
+    def step(self, action):
+        """
+        Performs one step with the given action. Transforms the current observation, calculates the reward.
+        """
+        # update assignment, which automatically updates availability and operation times
+        self.update_assignment(action)
+
+        # update observation
+        new_observation = self._transform_observation()
+        reward = self._calculate_reward(new_observation)
+
+        if new_observation['unassigned operations'] == 0:
+            terminate = True
+        else:
+            terminate = False
+
+        return new_observation, reward, terminate
+
+    def _transform_observation(self):
+        """
+        Generates the new observation
+        """
+        new_observation = {
+            'assignment matrix': self.assignment,
+            'availability matrix': self.availability,
+            'unassigned operations': self.current_observation['unassigned operations'] - 1
+        }
+        return new_observation
+
+    def _calculate_reward(self, new_observation):
+        """
+        Calculates the value of the reward function.
+        """
+        if self.current_observation['unassigned operations'] > new_observation['unassigned operations']:
+            reward = 1
+        else:
+            reward = 0
+
+        return reward
 
     def load_instance(self, instance_path):
         """
@@ -71,18 +139,28 @@ class DJSPEnv(gym.Env):
         dim = 0
         for op_type in range(0, self.n_operations+1):
             dim += self.n_aircraft * self.machines_per_op[op_type]
-        self.action_space = spaces.Discrete(dim)
+        self.action_space = Discrete(dim)
 
     def _init_observationspace(self):
         """
-        Initialises the observation space as a dictionary of simple spaces.
+        Initialises the observation space as a dictionary of simple spaces. Currently implemented are:
+          1. assignment matrix
 
         IDEAS:
+         - assignment matrix
+         - availability matrix
          - number of unassigned operations
          - number of tardy flights
          - total tardiness [min]
          - utilisation rate of each machine [%]
         """
+        self.observation_space = Dict(
+            {
+                'assignment matrix': MultiBinary([self.n_aircraft, self.n_operations, self.n_operations]),
+                'availability matrix': MultiBinary([self.n_aircraft, self.n_operations, self.n_operations]),
+                'unassigned operations': Discrete(self.n_operations)
+            }
+        )
 
     def _init_availability(self):
         """
@@ -144,6 +222,44 @@ class DJSPEnv(gym.Env):
                            self.operation_times[a2, op]['Earliest Start'] <= self.operation_times[a1, op]['Earliest End']:
                             self.time_conflicts[op, a1, a2] = 1
 
+    def update_assignment(self, action):
+        """
+        Updates assignment for a given action and write scheduled time into operation_times.
+        Machine availability is also adjusted.
+        """
+        aircraft_index, operation_index, machine_index = self.convert_action_to_assignment(action)
+        self.assignment[aircraft_index, operation_index, machine_index] = 1
+        self.update_availability(aircraft_index, operation_index, machine_index)
+        self.update_operation_times(aircraft_index, operation_index)
+
+    def update_availability(self, ac_index, op_index, mach_index):
+        """
+        For a sampled action, the availability matrix is adjusted to show the machine at mach_index as unavailable for
+        all aircraft whose operation op_index coincides with the operation chosen.
+        """
+        conflict_aircraft_idxs = np.where(self.time_conflicts[op_index, ac_index, :])[0]
+        for aircraft_idx in conflict_aircraft_idxs:
+            self.availability[aircraft_idx, op_index, mach_index] = 0
+
+    def update_operation_times(self, ac_index, op_index):
+        """
+        Updates the scheduled start and end times.
+        """
+        self.operation_times[ac_index, op_index]['Scheduled Start'] = self.operation_times[ac_index, op_index]['Earliest Start']
+        self.operation_times[ac_index, op_index]['Scheduled End'] = self.operation_times[ac_index, op_index]['Earliest End']
+
+    def convert_action_to_assignment(self, action_index):
+        """
+        Action sampled from the action space is converted to an operation assignment. Returns the index of the
+        assignment cell the action corresponds to. Used by the update_assignment function
+        """
+        aircraft_index = int(action_index / (self.n_operations * self.n_machines))
+        normalised_index = action_index - (self.n_operations * self.n_machines * aircraft_index)
+        operation_index = int(normalised_index / self.n_machines)
+        machine_index = normalised_index - (self.n_machines * operation_index)
+
+        return aircraft_index, operation_index, machine_index
+
     def earliest_times(self, op_idx, ac_idx):
         """
         Gathers earliest start from precedence function and uses it to calculate the earliest end time for an operation
@@ -172,43 +288,5 @@ class DJSPEnv(gym.Env):
                         # calculate earliest start and end times for the preceding operation
                         prec_start, prec_end = self.earliest_times(idx, ac_idx)
                         self.operation_times[ac_idx, idx] = {'Earliest Start': prec_start, 'Earliest End': prec_end,
-                                                                     'Scheduled Start': None, 'Scheduled End': None}
+                                                             'Scheduled Start': None, 'Scheduled End': None}
                     return self.operation_times[ac_idx, idx]['Earliest Start']
-
-    def convert_action_to_assignment(self, action_index):
-        """
-        Action sampled from the action space is converted to an operation assignment. Returns the index of the
-        assignment cell the action corresponds to. Used by the update_assignment function
-        """
-        aircraft_index = int(action_index / (self.n_operations * self.n_machines))
-        normalised_index = action_index - (self.n_operations * self.n_machines * aircraft_index)
-        operation_index = int(normalised_index / self.n_machines)
-        machine_index = normalised_index - (self.n_machines * operation_index)
-        
-        return aircraft_index, operation_index, machine_index
-
-    def update_assignment(self, action):
-        """
-        Updates assignment for a given action and write scheduled time into operation_times.
-        Machine availability is also adjusted.
-        """
-        aircraft_index, operation_index, machine_index = self.convert_action_to_assignment(action)
-        self.assignment[aircraft_index, operation_index, machine_index] = 1
-        self.update_availability(aircraft_index, operation_index, machine_index)
-        self.update_operation_times(aircraft_index, operation_index)
-
-    def update_availability(self, ac_index, op_index, mach_index):
-        """
-        For a sampled action, the availability matrix is adjusted to show the machine at mach_index as unavailable for
-        all aircraft whose operation op_index coincides with the operation chosen.
-        """
-        conflict_aircraft_idxs = np.where(self.time_conflicts[op_index, ac_index, :])[0]
-        for aircraft_idx in conflict_aircraft_idxs:
-            self.availability[aircraft_idx, op_index, mach_index] = 0
-
-    def update_operation_times(self, ac_index, op_index):
-        """
-        Updates the scheduled start and end times.
-        """
-        self.operation_times[ac_index, op_index]['Scheduled Start'] = self.operation_times[ac_index, op_index]['Earliest Start']
-        self.operation_times[ac_index, op_index]['Scheduled End'] = self.operation_times[ac_index, op_index]['Earliest End']
