@@ -12,9 +12,9 @@ class DJSPEnv(gym.Env):
     An operation scheduling environment for OpenAI gym, developed specifically for the scheduling of ground handling
     equipment to aircraft. Capable of considering parallel processes.
     """
-    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
+    # metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
-    def __init__(self, render_mode=None, instance_path=None):
+    def __init__(self, instance_path=None, render_mode=None):
         self.n_aircraft = 0
         self.n_operations = 0
         self.machines_per_op = []
@@ -126,7 +126,7 @@ class DJSPEnv(gym.Env):
         # matrix of tasks which can be run in parallel
         self.parallel_mask = np.empty((self.n_operations, self.n_operations), dtype=bool)
         s = 2+self.n_aircraft
-        for idx in range(s, s+self.n_operations+1):
+        for idx in range(s, s+self.n_operations):
             self.parallel_mask[idx-s] = [int(x) for x in lines[idx].split()]
 
     def _init_actionspace(self):
@@ -185,7 +185,7 @@ class DJSPEnv(gym.Env):
         :return:
         """
         for nmachines in self.machines_per_op:
-            self.assignment.append(np.empty(shape=(self.n_aircraft, self.n_operations, nmachines)))
+            self.assignment = np.empty(shape=(self.n_aircraft, self.n_operations, nmachines), dtype=bool)
 
     def _init_operation_times(self):
         """
