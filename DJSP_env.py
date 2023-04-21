@@ -4,7 +4,6 @@ import gymnasium as gym
 from gymnasium.spaces import Box, Discrete, Dict, MultiBinary, MultiDiscrete
 from pandas import to_datetime
 
-import utils
 
 
 class DJSPEnv(gym.Env):
