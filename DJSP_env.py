@@ -72,7 +72,7 @@ class DJSPEnv(gym.Env):
         self.current_observation = self._transform_observation()
         reward = self._calculate_reward(self.current_observation)
 
-        if self.current_observation['unassigned operations'] == 0:
+        if self.current_observation['unassigned operations'] == 0 or self.action_mask.all():
             terminate = True
         else:
             terminate = False
