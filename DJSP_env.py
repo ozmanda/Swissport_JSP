@@ -220,12 +220,16 @@ class DJSPEnv(gym.Env):
         for op in range(0, self.n_operations):
             for a1 in range(0, self.n_aircraft):
                 for a2 in range(0, self.n_aircraft):
-                    if a1 == a2:
+                    if self.time_conflicts[op, a1, a2]:
+                        continue
+                    elif a1 == a2:
                         self.time_conflicts[op, a1, a2] = 1
                     else:
-                        if self.operation_times[a1, op]['Earliest Start'] >= self.operation_times[a2, op]['Earliest End'] and \
+                        x=5
+                        if self.operation_times[a1, op]['Earliest Start'] <= self.operation_times[a2, op]['Earliest End'] and \
                            self.operation_times[a2, op]['Earliest Start'] <= self.operation_times[a1, op]['Earliest End']:
                             self.time_conflicts[op, a1, a2] = 1
+                            self.time_conflicts[op, a2, a1] = 1
 
     def update_assignment(self, action):
         """
