@@ -80,6 +80,9 @@ class DJSPEnv(gym.Env):
         return self.current_observation, reward, terminate
 
     def sample_action(self):
+        """
+        Samples action under consideration of machine availability (flattened and converted from bool to np.int8)
+        """
         return self.action_space.sample(mask=self.action_mask)
 
     def _transform_observation(self):
@@ -121,9 +124,10 @@ class DJSPEnv(gym.Env):
         # read information for each aircraft
         for linenr in range(2, 2+self.n_aircraft):
             line = lines[linenr].split()
-            info = {'ETA': to_datetime(line[0], format='%H%M'),
-                    'STD': to_datetime(line[1], format='%H%M'),
-                    'Processing Times': [int(t) for t in line[2:]]}
+            info = {'REG': line[0],
+                    'ETA': to_datetime(line[1], format='%H%M'),
+                    'STD': to_datetime(line[2], format='%H%M'),
+                    'Processing Times': [int(t) for t in line[3:]]}
             self.aircraft.append(info)
 
         # matrix of tasks which can be run in parallel
@@ -252,6 +256,10 @@ class DJSPEnv(gym.Env):
         self.operation_times[ac_index, op_index]['Scheduled End'] = self.operation_times[ac_index, op_index]['Earliest End']
 
     def update_action_mask(self):
+        """
+        Updates the action mask with the new availability matrix --> flattened and converted from bool to np.int8 as
+        required by the .sample() function
+        """
         self.action_mask = np.ravel(self.availability).astype(np.int8)
 
     def convert_action_to_assignment(self, action_index):
