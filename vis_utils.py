@@ -2,6 +2,7 @@ import matplotlib
 import numpy as np
 import plotly.express as px
 
+
 def machine_assignment_dict(assignment, machines_per_op, aircraft_info, operation_times):
     """
     Converts a scheduling assignment to a dictionary suited for usage with ff.create_gantt()
@@ -25,6 +26,7 @@ def machine_assignment_dict(assignment, machines_per_op, aircraft_info, operatio
 
             machine_index += 1
     return assignment_dict, machines
+
 
 def render_schedule(assignment, machines_per_op, aircraft_info, operation_times):
     assignment_dict, machines = machine_assignment_dict(assignment, machines_per_op, aircraft_info, operation_times)
