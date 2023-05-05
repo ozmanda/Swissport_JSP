@@ -1,8 +1,10 @@
 import numpy as np
+import pandas as pd
 from pandas import to_datetime, Timedelta
 import gymnasium as gym
 from gymnasium.spaces import Box, Discrete, Dict, MultiBinary, MultiDiscrete
 from pandas import to_datetime
+from utils import minutes_since_midnight
 
 
 
@@ -14,30 +16,40 @@ class DJSPEnv(gym.Env):
     # metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
     def __init__(self, instance_path=None, render_mode=None):
+        # declare variables which are required to store information from the instance specification
         self.n_aircraft = 0
         self.n_operations = 0
         self.machines_per_op = []
         self.n_machines = 0
         self.aircraft = []  # list of dictionaries containing relevant flight information
         self.parallel_mask = np.empty(shape=(1, 1), dtype=bool)
-        self.assignment = np.zeros(shape=(1, 1), dtype=bool)
-        self.availability = np.zeros(shape=(1, 1), dtype=bool)
-        self.operation_times = np.empty(shape=(1, 1), dtype=dict)
-        self.time_conflicts = np.empty(shape=(1, 1), dtype=bool)
-        self.current_observation = {}
 
         # load instance and initialise relevant matrices
         if instance_path:
             self.load_instance(instance_path)
+
+        # declare remaining variables
+        self.assignment = np.zeros(shape=(self.n_aircraft, self.n_operations, self.n_machines), dtype=bool)
+        self.time_availability = np.zeros(shape=(self.n_aircraft, self.n_operations, self.n_machines), dtype=pd.Timestamp)
+        self.time_availability_discrete = np.zeros(shape=(self.n_aircraft, self.n_operations, self.n_machines), dtype=int)
+        self.availability = np.zeros(shape=(self.n_aircraft, self.n_operations, self.n_machines), dtype=bool)
+        self.operation_times = np.empty(shape=(self.n_aircraft, self.n_operations), dtype=dict)
+        self.time_conflicts = np.empty(shape=(self.n_operations, self.n_aircraft, self.n_aircraft), dtype=bool)
+        self.delays = {'Total Delay': 0, 'Average Delay': 0, 'Delays': []}
+        self.current_observation = {}
+
+        # fill matrices and set action mask
         self._init_availability()
-        self.action_mask = np.ravel(self.availability).astype(np.int8)
-        self._init_assignment()
         self._init_operation_times()
+        self._init_timeavailability()
+        self.action_mask = np.ravel(self.availability).astype(np.int8)
 
         # save empty matrices for easy environment resetting
         self.init_assignment = self.assignment
         self.init_availability = self.availability
         self.init_operation_times = self.operation_times
+        self.init_time_availability = self.time_availability
+        self.init_time_availability_discrete = self.time_availability_discrete
 
         # initialise action and observation space
         self._init_actionspace()
@@ -127,7 +139,7 @@ class DJSPEnv(gym.Env):
             info = {'REG': line[0],
                     'ETA': to_datetime(line[1], format='%H%M'),
                     'STD': to_datetime(line[2], format='%H%M'),
-                    'Processing Times': [int(t) for t in line[3:]]}
+                    'Processing Times': [Timedelta(minutes=int(t)) for t in line[3:]]}
             self.aircraft.append(info)
 
         # matrix of tasks which can be run in parallel
@@ -135,6 +147,22 @@ class DJSPEnv(gym.Env):
         s = 2+self.n_aircraft
         for idx in range(s, s+self.n_operations):
             self.parallel_mask[idx-s] = [int(x) for x in lines[idx].split()]
+
+    def _init_timeavailability(self):
+        """
+        Initialises the availability matrix containing earliest machine availability. This is the alternative to the
+        binary availability matrix and allows for delayed assignment. Time is given in minutes since midnight.
+        """
+        type_start = 0
+        for operationtype, nmachines in enumerate(self.machines_per_op):
+            next_type_start = type_start+nmachines
+            for aircraft in range(self.n_aircraft):
+                # assign machine earliest availability to operation earliest start
+                start = self.operation_times[aircraft, operationtype]['Earliest Start']
+                self.time_availability[aircraft, operationtype, type_start:next_type_start] = start
+                self.time_availability_discrete[aircraft, operationtype,
+                                                type_start:next_type_start] = minutes_since_midnight(start)
+            type_start = next_type_start
 
     def _init_actionspace(self):
         """
@@ -174,7 +202,6 @@ class DJSPEnv(gym.Env):
         Initialises the availability matrix showing which machines can be used for which aircraft operations, the matrix
         has the shape [aircraft x operations x machines].
         """
-        self.availability = np.zeros(shape=(self.n_aircraft, self.n_operations, self.n_machines), dtype=bool)
         type_start = 0
         for operation_type, nmachines in enumerate(self.machines_per_op):
             next_type_start = type_start+nmachines
@@ -185,18 +212,10 @@ class DJSPEnv(gym.Env):
             # assign variables for next iteration
             type_start = next_type_start
 
-    def _init_assignment(self):
-        """
-        Initialises the assignment matrix [aircraft x operations x machines] for each type of operation
-        :return:
-        """
-        self.assignment = np.zeros(shape=(self.n_aircraft, self.n_operations, self.n_machines), dtype=bool)
-
     def _init_operation_times(self):
         """
         Initialises the operation times dict-arrays containing earliest start & end and scheduled start & end times
         """
-        self.operation_times = np.empty(shape=(self.n_aircraft, self.n_operations), dtype=dict)
         for aircraft in range(0, self.n_aircraft):
             for operation in range(0, self.n_operations):
                 # check that earliest times have not already been calculated by a successive operative
@@ -216,7 +235,6 @@ class DJSPEnv(gym.Env):
         different types are not considered.
         :return:
         """
-        self.time_conflicts = np.zeros(shape=(self.n_operations, self.n_aircraft, self.n_aircraft), dtype=bool)
         for op in range(0, self.n_operations):
             for a1 in range(0, self.n_aircraft):
                 for a2 in range(0, self.n_aircraft):
@@ -240,7 +258,7 @@ class DJSPEnv(gym.Env):
         self.assignment[aircraft_index, operation_index, machine_index] = 1
         self.update_availability(aircraft_index, operation_index, machine_index)
         self.update_action_mask()
-        self.update_operation_times(aircraft_index, operation_index)
+        self.update_operation_times(aircraft_index, operation_index, machine_index)
 
     def update_availability(self, ac_index, op_index, mach_index):
         """
@@ -252,12 +270,17 @@ class DJSPEnv(gym.Env):
         for aircraft_idx in conflict_aircraft_idxs:
             self.availability[aircraft_idx, op_index, mach_index] = 0
 
-    def update_operation_times(self, ac_index, op_index):
+    def update_operation_times(self, ac_index, op_index, mach_index):
         """
         Updates the scheduled start and end times.
         """
-        self.operation_times[ac_index, op_index]['Scheduled Start'] = self.operation_times[ac_index, op_index]['Earliest Start']
-        self.operation_times[ac_index, op_index]['Scheduled End'] = self.operation_times[ac_index, op_index]['Earliest End']
+        # start = self.time_availability[ac_index, op_index, mach_index]
+        # self.operation_times[ac_index, op_index]['Scheduled Start'] = start
+        # self.operation_times[ac_index, op_index]['Scheduled End'] = start + self.aircraft[ac_index]['Processing Times'][op_index]
+        self.operation_times[ac_index, op_index]['Scheduled Start'] = self.operation_times[ac_index, op_index][
+            'Earliest Start']
+        self.operation_times[ac_index, op_index]['Scheduled End'] = self.operation_times[ac_index, op_index][
+            'Earliest End']
 
     def update_action_mask(self):
         """
@@ -265,6 +288,28 @@ class DJSPEnv(gym.Env):
         required by the .sample() function
         """
         self.action_mask = np.ravel(self.availability).astype(np.int8)
+
+    def update_timeavailability(self, ac_index, op_index, mach_index):
+        """
+        Updates the timeavailability matrix cfor the machine at mach_index, setting it to 0 for the assigned operation
+        at op_index and adjusting the earliest times for all other operations.
+        """
+        # determine new earliest availability for machine at mach_index
+        self.time_availability[ac_index, op_index, mach_index] = 0
+        for aircraft in range(self.n_aircraft):
+            self.time_availability[aircraft, op_index, mach_index] = self.operation_times[ac_index, op_index]['Scheduled End']
+
+    def update_delay(self, ac_index, op_index):
+        """
+        Updates delay dictionary, adding delay in minutes to list of delays, adding to total delay and recalculating
+        the average delay over all delayes operations
+        """
+        delay = int(self.operation_times[ac_index, op_index]['Scheduled End'] - \
+                self.operation_times[ac_index, op_index]['Earliest End'])
+        if delay != 0:
+            self.delays['Delays'].append(delay)
+            self.delays['Total Delay'] += delay
+            self.delays['Average Delay'] = np.mean(self.delays['Delays'])
 
     def convert_action_to_assignment(self, action_index):
         """
@@ -283,7 +328,7 @@ class DJSPEnv(gym.Env):
         Gathers earliest start from precedence function and uses it to calculate the earliest end time for an operation
         """
         earliest_start = self.precedence(op_idx, ac_idx)
-        earliest_end = earliest_start + Timedelta(minutes=self.aircraft[ac_idx]['Processing Times'][op_idx])
+        earliest_end = earliest_start + self.aircraft[ac_idx]['Processing Times'][op_idx]
         return earliest_start, earliest_end
 
     def precedence(self, op_idx, ac_idx):
@@ -297,17 +342,16 @@ class DJSPEnv(gym.Env):
         # aircraft ETA is the earliest start time with no preceding ops
         if precedence_idxs.size == 0:
             return self.aircraft[ac_idx]['ETA']
-
         else:
             # check that the operation is not a parallel task (parallel when [op,idx]==1 and [idx,op]==1)
             earliest_start = self.aircraft[ac_idx]['ETA']
             for preceding_op in precedence_idxs:
                 if not self.parallel_mask[op_idx, preceding_op]:
-                    if not self.operation_times[ac_idx, op_idx]:
-                        # calculate earliest start and end times for the preceding operation
-                        prec_start, prec_end = self.earliest_times(preceding_op, ac_idx)
-                        self.operation_times[ac_idx, preceding_op] = {'Earliest Start': prec_start, 'Earliest End': prec_end,
-                                                             'Scheduled Start': None, 'Scheduled End': None}
-                    earliest_start = self.operation_times[ac_idx, preceding_op]['Earliest Start']
+                    # if not self.operation_times[ac_idx, op_idx]:
+                    #     # calculate earliest start and end times for the preceding operation
+                    #     prec_start, prec_end = self.earliest_times(preceding_op, ac_idx)
+                    #     self.operation_times[ac_idx, preceding_op] = {'Earliest Start': prec_end, 'Earliest End': prec_end,
+                    #                                          'Scheduled Start': None, 'Scheduled End': None}
+                    earliest_start = self.operation_times[ac_idx, preceding_op]['Earliest End']
 
             return earliest_start
