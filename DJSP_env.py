@@ -35,7 +35,7 @@ class DJSPEnv(gym.Env):
         self.availability = np.zeros(shape=(self.n_aircraft, self.n_operations, self.n_machines), dtype=bool)
         self.operation_times = np.empty(shape=(self.n_aircraft, self.n_operations), dtype=dict)
         self.time_conflicts = np.empty(shape=(self.n_operations, self.n_aircraft, self.n_aircraft), dtype=bool)
-        self.delays = {'Total Delay': 0, 'Average Delay': 0, 'Delays': []}
+        self.delays = {'Operative Delays': [], 'Aircraft Delays': [], 'Total Aircraft Delay': 0}
         self.current_observation = {}
 
         # fill matrices and set action mask
@@ -180,20 +180,13 @@ class DJSPEnv(gym.Env):
         """
         Initialises the observation space as a dictionary of simple spaces. Currently implemented are:
           1. assignment matrix
-
-        IDEAS:
-         - assignment matrix
-         - availability matrix
-         - number of unassigned operations
-         - number of tardy flights
-         - total tardiness [min]
-         - utilisation rate of each machine [%]
+          2. total aircraft delay
         """
+        delaydim = 0
         self.observation_space = Dict(
             {
                 'assignment matrix': MultiBinary([self.n_aircraft, self.n_operations, self.n_operations]),
-                'availability matrix': MultiBinary([self.n_aircraft, self.n_operations, self.n_operations]),
-                'unassigned operations': Discrete(self.n_operations)
+                'Total Aircraft Delay': Discrete(delaydim)
             }
         )
 
