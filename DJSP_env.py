@@ -22,9 +22,11 @@ class DJSPEnv(gym.Env):
     def __init__(self, instance_path=None, a=None, p=None):
         # set global variables if provided
         if a:
-            global alpha=a
+            global alpha
+            alpha=a
         if p:
-            global phi=p
+            global phi
+            phi=p
 
         # declare variables which are required to store information from the instance specification
         self.n_aircraft = 0
@@ -44,6 +46,7 @@ class DJSPEnv(gym.Env):
                                           dtype=pd.Timestamp)
         # self.time_availability_discrete = np.zeros(shape=(self.n_aircraft, self.n_operations, self.n_machines), dtype=int)
         self.availability = np.zeros(shape=(self.n_aircraft, self.n_operations, self.n_machines), dtype=bool)
+        self.operation_pointers = np.zeros(shape=(self.n_operations, 2), dtype=list)
         self.operation_times = np.empty(shape=(self.n_aircraft, self.n_operations), dtype=dict)
         self.time_conflicts = np.empty(shape=(self.n_operations, self.n_aircraft, self.n_aircraft), dtype=bool)
         self.delays = {'Operative Delays': np.zeros(shape=(self.n_aircraft, self.n_operations)),
@@ -56,6 +59,7 @@ class DJSPEnv(gym.Env):
                         'total reward': 0}
 
         # fill matrices and set action mask
+        self._init_operation_pointers()
         self._init_availability()
         self._init_operation_times()
         self._init_timeavailability()
@@ -129,7 +133,7 @@ class DJSPEnv(gym.Env):
 
     def _calculate_reward(self, delay, aircraft_index, function='linear'):
         """ Calculates the value of the reward function. """
-        delay =
+        delay = 0
         # calculate the aircraft reward for the assigned
         if delay == 0:
             return self.rewards['total reward']
@@ -246,6 +250,15 @@ class DJSPEnv(gym.Env):
 
             # assign variables for next iteration
             type_start = next_type_start
+
+    def _init_operation_pointers(self):
+        """
+        Initialises a "pointer" array of shape (n_ops, 2) containing the indices of operations preceding and following
+        operations
+        """
+        for op_index in range(self.n_operations):
+            self.operation_pointers[op_index, 0] = self.before(op_index)
+            self.operation_pointers[op_index, 1] = self.after(op_index)
 
     def _init_operation_times(self):
         """
@@ -395,22 +408,36 @@ class DJSPEnv(gym.Env):
         delay = int(self.operation_times[ac_index, op_index]['Scheduled End'] - \
                     self.operation_times[ac_index, op_index]['Earliest End'])
         if delay != 0:
+            # Set current delay of delayed operation
+            self.operation_times[ac_index, op_index]['Current Delay'] = delay
+
             # Add delay to operative delays list and total operative delay
             self.delays['Operative Delays'][ac_index, op_index] = delay
             self.delays['Total Operative Delay'] += delay
 
             # update delay for following operations
-            self.update_following_delays(ac_index, op_index)
+            self.update_following_delays(ac_index, op_index, delay)
             self.update_aircraft_delay(ac_index, op_index)
 
-    def update_following_delays(self, ac_index, op_index):
+    def update_following_delays(self, ac_index, op_index, delay):
         """
         Updates the delay for all operations following the operation at op_index for the aircraft at ac_index
         """
-        following_ops = self.following(op_index)
-        for op in following_ops:
-            if self.operation_times[ac_index, op]['Scheduled Start']:
-                self.operation_times[ac_index, op_index]['Current Delay'] =
+        following = True
+        prev_idx = op_index
+        while following:
+            if self.operation_pointers[prev_idx, 1]:
+                following_idx = self.operation_pointers[prev_idx, 1]
+                if not self.operation_times[ac_index, following_idx]['Scheduled Start']:
+                    # set current delay and update indices for next iteration
+                    self.operation_times[ac_index, following_idx]['Current Delay'] = delay
+                    prev_idx += 1
+                    following_idx += 1
+                else:
+                    # delay for all following operations is given by the already scheduled operation
+                    following = False
+            else:
+                following = False
 
     def update_aircraft_delay(self, ac_index, op_index):
         """
@@ -420,7 +447,8 @@ class DJSPEnv(gym.Env):
         dep = self.aircraft[ac_index]['STD']
         if not following_ops:
             # evaluate if the delayed operation causes aircraft delay
-            if self.operation_times[ac_index, ]['Scheduled End']
+            if self.operation_times[ac_index, ]['Scheduled End']:
+
         else:
     # evaluate for foll
 
@@ -443,47 +471,60 @@ class DJSPEnv(gym.Env):
         """
         Gathers earliest start from precedence function and uses it to calculate the earliest end time for an operation
         """
-        earliest_start = self.precedence(op_idx, ac_idx)
+        # if no prior operation must be completed, set earliest start to aircraft ETA
+        earliest_start = self.aircraft[ac_idx]['ETA']
+        if not self.operation_pointers[op_idx, 0]:
+            return earliest_start
+        else:
+            # gather earliest end of prior operation, set earliest start = the latest end of prior operations
+            for idx in self.operation_pointers[op_idx, 0]:
+                prior_end = self.operation_times[ac_idx, idx]['Earliest End']
+                if prior_end > earliest_start:
+                    earliest_start = prior_end
+
         earliest_end = earliest_start + self.aircraft[ac_idx]['Processing Times'][op_idx]
         return earliest_start, earliest_end
 
-    def precedence(self, op_idx, ac_idx):
+    def before(self, op_idx):
         """
-        Identifies operations preceding op_idx and returns the earliest end time of that operation, which is also the
-        earliest start time of the successive operation.
+        Identifies the index of the operation(s) which must be completed before the operation at op_index can begin
+        and returns it/them in the form of a list
         """
-        # identify potential preceding operations - where the column [:,op] for operation is True, return None if empty
+        idxs = []
         precedence_idxs = np.where(self.parallel_mask[:, op_idx])[0]
 
-        # aircraft ETA is the earliest start time with no preceding ops
+        # iterate through potential preceding operations and append operation indices which are not parallel
         if not precedence_idxs.size:
-            return self.aircraft[ac_idx]['ETA']
+            return None
         else:
-            # check that the operation is not a parallel task (parallel when [op,idx]==1 and [idx,op]==1)
-            earliest_start = self.aircraft[ac_idx]['ETA']
-            for preceding_op in precedence_idxs:
-                if not self.parallel_mask[op_idx, preceding_op]:
-                    # if not self.operation_times[ac_idx, op_idx]:
-                    #     # calculate earliest start and end times for the preceding operation
-                    #     prec_start, prec_end = self.earliest_times(preceding_op, ac_idx)
-                    #     self.operation_times[ac_idx, preceding_op] = {'Earliest Start': prec_end, 'Earliest End': prec_end,
-                    #                                          'Scheduled Start': None, 'Scheduled End': None}
-                    earliest_start = self.operation_times[ac_idx, preceding_op]['Earliest End']
+            for op in precedence_idxs:
+                if not self.parallel_mask[op_idx, op]:
+                    idxs.append(op)
 
-            return earliest_start
+        if not len(idxs):
+            return None
+        else:
+            return idxs
 
-    def following(self, op_idx):
-        # identify potential following operations - where the column
+    def after(self, op_idx):
+        """
+        Identifies the index of the operation(s) which must be completed after the operation at op_index can begin
+        and returns it/them in the form of a list
+        """
+        idxs = []
         following_idxs = np.where(self.parallel_mask[op_idx, :])[0]
-        following_ops = []
 
         if not following_idxs.size:
             return None
-        for following_op in following_idxs:
-            if not self.parallel_mask[following_op, op_idx]:
-                following_ops.append(following_op)
+        else:
+            for op in following_idxs:
+                if not self.parallel_mask[op, op_idx]:
+                    idxs.append(op)
 
-        return following_ops
+        if not len(idxs):
+            return None
+        else:
+            return idxs
 
     def calculate_max_delays(self):
         """
