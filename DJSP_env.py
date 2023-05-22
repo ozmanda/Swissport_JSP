@@ -6,14 +6,26 @@ from gymnasium.spaces import Box, Discrete, Dict, MultiBinary, MultiDiscrete
 from pandas import to_datetime
 from utils import minutes_to_midnight
 
+# GLOBAL MODEL PARAMETERS
+alpha = 0.1
+phi = 0.001
+delta = 0
+
 class DJSPEnv(gym.Env):
     """
     An operation scheduling environment for OpenAI gym, developed specifically for the scheduling of ground handling
     equipment to aircraft. Capable of considering parallel processes.
     """
+
     # metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
-    def __init__(self, instance_path=None, alpha=0.1, gamma=1.2, phi=2):
+    def __init__(self, instance_path=None, a=None, p=None):
+        # set global variables if provided
+        if a:
+            global alpha=a
+        if p:
+            global phi=p
+
         # declare variables which are required to store information from the instance specification
         self.n_aircraft = 0
         self.n_operations = 0
@@ -28,15 +40,20 @@ class DJSPEnv(gym.Env):
 
         # declare remaining variables
         self.assignment = np.zeros(shape=(self.n_aircraft, self.n_operations, self.n_machines), dtype=bool)
-        self.time_availability = np.zeros(shape=(self.n_aircraft, self.n_operations, self.n_machines), dtype=pd.Timestamp)
+        self.time_availability = np.zeros(shape=(self.n_aircraft, self.n_operations, self.n_machines),
+                                          dtype=pd.Timestamp)
         # self.time_availability_discrete = np.zeros(shape=(self.n_aircraft, self.n_operations, self.n_machines), dtype=int)
         self.availability = np.zeros(shape=(self.n_aircraft, self.n_operations, self.n_machines), dtype=bool)
         self.operation_times = np.empty(shape=(self.n_aircraft, self.n_operations), dtype=dict)
         self.time_conflicts = np.empty(shape=(self.n_operations, self.n_aircraft, self.n_aircraft), dtype=bool)
-        self.delays = {'Operative Delays': [], 'Total Operative Delay': 0,
-                       'Aircraft Delays': [], 'Total Aircraft Delay': 0}
+        self.delays = {'Operative Delays': np.zeros(shape=(self.n_aircraft, self.n_operations)),
+                       'Total Operative Delay': 0,
+                       'Aircraft Delays': np.zeros(shape=self.n_aircraft),
+                       'Total Aircraft Delay': 0}
         self.current_observation = {}
-        self.total_max_delay = self.calculate_max_delay()
+        self.max_delays = self.calculate_max_delays()
+        self.rewards = {'per aircraft': np.zeros(shape=self.n_aircraft),
+                        'total reward': 0}
 
         # fill matrices and set action mask
         self._init_availability()
@@ -70,19 +87,24 @@ class DJSPEnv(gym.Env):
         # reset observation space
         self.current_observation = {
             'assignment matrix': self.init_assignment,
-            'total aircraft delay': self.delays['Total Aircraft Delay']
+            'total aircraft delay': self.delays['Aircraft Delays']
         }
         return self.current_observation
 
     def step(self, action):
         """
-        Performs one step with the given action. Transforms the current observation, calculates the reward.
+        Performs one step with the given action. Transforms the current observation, calculates the reward. Assignment
+        update automatically performs the following updates as well:
+         - availability matrices
+         - operation times
+         - action mask
+         - aircraft delay
         """
         # update assignment, which automatically performs other updates (indices calculated in assignment update)
-        self.update_assignment(action)
+        aircraft_index = self.update_assignment(action)
 
         # update observation
-        self.current_observation = self._transform_observation()
+        self.current_observation, new_delay = self._transform_observation()
         reward = self._calculate_reward(self.current_observation)
 
         # terminate only when no machine-operation assignments are available / feasible
@@ -94,32 +116,48 @@ class DJSPEnv(gym.Env):
         return self.current_observation, reward, terminate
 
     def sample_action(self):
-        """
-        Samples action under consideration of machine availability (flattened and converted from bool to np.int8)
-        """
+        """ Samples action under consideration of machine availability (flattened and converted from bool to np.int8)"""
         return self.action_space.sample(mask=self.action_mask)
 
     def _transform_observation(self):
-        """
-        Generates the new observation
-        """
+        """ Generates the new observation """
         new_observation = {
             'assignment matrix': self.assignment,
             'total aircraft delay': self.delays['Total Aircraft Delay']
         }
         return new_observation
 
-    def _calculate_reward(self, new_observation):
-        """
-        Calculates the value of the reward function.
-        delta: maximum possible total delay for the schedule, used to
-        """
-        if self.current_observation['unassigned operations'] > new_observation['unassigned operations']:
-            reward = 19
-        else:
-            reward = 0
+    def _calculate_reward(self, delay, aircraft_index, function='linear'):
+        """ Calculates the value of the reward function. """
+        delay =
+        # calculate the aircraft reward for the assigned
+        if delay == 0:
+            return self.rewards['total reward']
+        elif delay < 15:
+            self.rewards['per aircraft'][aircraft_index] = self.pre_delay_reward_function(delay)
+        elif delay >= 15:
+            if function == 'linear':
+                self.rewards['per aircraft'][aircraft_index] = self.linear_reward(delay)
+            elif function == 'exponential':
+                self.rewards['per aircraft'][aircraft_index] = self.exponential_reward(delay)
 
-        return reward
+    def pre_delay_reward_function(self, delay):
+        return (alpha / 15) * delay
+
+    def _linear_intercept(self):
+        return 1 - ((1 - alpha) / (delta - 15)) * delta
+
+    def linear_reward(self, delay):
+        m = self._linear_intercept()
+        return ((1 - alpha) / (delta - 15)) * delay + m
+
+    def _exponental_intercept(self):
+        r = alpha - (phi * np.e ** (15 - delta))
+        return r
+
+    def exponential_reward(self, delay):
+        beta = self._exponental_intercept()
+        return phi * np.exp(delay - delta) + beta
 
     def load_instance(self, instance_path):
         """
@@ -136,7 +174,7 @@ class DJSPEnv(gym.Env):
         self.n_machines = np.sum(self.machines_per_op)
 
         # read information for each aircraft
-        for linenr in range(2, 2+self.n_aircraft):
+        for linenr in range(2, 2 + self.n_aircraft):
             line = lines[linenr].split()
             info = {'REG': line[0],
                     'ETA': to_datetime(line[1], format='%H%M'),
@@ -146,9 +184,11 @@ class DJSPEnv(gym.Env):
 
         # matrix of tasks which can be run in parallel
         self.parallel_mask = np.empty((self.n_operations, self.n_operations), dtype=bool)
-        s = 2+self.n_aircraft
-        for idx in range(s, s+self.n_operations):
-            self.parallel_mask[idx-s] = [int(x) for x in lines[idx].split()]
+        s = 2 + self.n_aircraft
+        for idx in range(s, s + self.n_operations):
+            self.parallel_mask[idx - s] = [int(x) for x in lines[idx].split()]
+
+    # INITIALISATION FUNCTIONS ----------------------------------------------------------------------------------------
 
     def _init_timeavailability(self):
         """
@@ -157,7 +197,7 @@ class DJSPEnv(gym.Env):
         """
         type_start = 0
         for operationtype, nmachines in enumerate(self.machines_per_op):
-            next_type_start = type_start+nmachines
+            next_type_start = type_start + nmachines
             for aircraft in range(self.n_aircraft):
                 # assign machine earliest availability to operation earliest start
                 start = self.operation_times[aircraft, operationtype]['Earliest Start']
@@ -199,7 +239,7 @@ class DJSPEnv(gym.Env):
         """
         type_start = 0
         for operation_type, nmachines in enumerate(self.machines_per_op):
-            next_type_start = type_start+nmachines
+            next_type_start = type_start + nmachines
 
             # assign availablity and machine upper and lower bounds
             self.availability[:, operation_type, type_start:next_type_start] = 1
@@ -218,7 +258,8 @@ class DJSPEnv(gym.Env):
                     continue
                 start, end = self.earliest_times(operation, aircraft)
                 self.operation_times[aircraft, operation] = {'Earliest Start': start, 'Earliest End': end,
-                                                             'Scheduled Start': None, 'Scheduled End': None}
+                                                             'Scheduled Start': None, 'Scheduled End': None,
+                                                             'Latest Start': None, 'Current Delay': 0}
 
         # use operation times to initialise time conflict matrix
         self._init_time_conflicts()
@@ -238,11 +279,15 @@ class DJSPEnv(gym.Env):
                     elif a1 == a2:
                         self.time_conflicts[op, a1, a2] = 1
                     else:
-                        x=5
-                        if self.operation_times[a1, op]['Earliest Start'] <= self.operation_times[a2, op]['Earliest End'] and \
-                           self.operation_times[a2, op]['Earliest Start'] <= self.operation_times[a1, op]['Earliest End']:
+                        x = 5
+                        if self.operation_times[a1, op]['Earliest Start'] <= self.operation_times[a2, op][
+                            'Earliest End'] and \
+                                self.operation_times[a2, op]['Earliest Start'] <= self.operation_times[a1, op][
+                            'Earliest End']:
                             self.time_conflicts[op, a1, a2] = 1
                             self.time_conflicts[op, a2, a1] = 1
+
+    # UPDATE FUNCTIONS ------------------------------------------------------------------------------------------------
 
     def update_assignment(self, action):
         """
@@ -253,13 +298,16 @@ class DJSPEnv(gym.Env):
         aircraft_index, operation_index, machine_index = self.convert_action_to_assignment(action)
         self.assignment[aircraft_index, operation_index, machine_index] = 1
 
-        # perform other
-        self.update_availability(aircraft_index, operation_index, machine_index)
+        # perform other updates which require index information
+        self.update_availability(aircraft_index, operation_index)
         self.update_operation_times(aircraft_index, operation_index, machine_index)
         self.update_time_availability(aircraft_index, operation_index, machine_index)
         self.update_action_mask()
+        self.update_delay(aircraft_index, operation_index)
 
-    def update_availability(self, ac_index, op_index, mach_index):
+        return aircraft_index
+
+    def update_availability(self, ac_index, op_index):
         """
         For a sampled action, the availability matrix is adjusted to show the operation at op_index as unavailable for
         assignment to all other machines.
@@ -295,11 +343,8 @@ class DJSPEnv(gym.Env):
         """
         start = self.time_availability[ac_index, op_index, mach_index]
         self.operation_times[ac_index, op_index]['Scheduled Start'] = start
-        self.operation_times[ac_index, op_index]['Scheduled End'] = start + self.aircraft[ac_index]['Processing Times'][op_index]
-        # self.operation_times[ac_index, op_index]['Scheduled Start'] = self.operation_times[ac_index, op_index][
-        #     'Earliest Start']
-        # self.operation_times[ac_index, op_index]['Scheduled End'] = self.operation_times[ac_index, op_index][
-        #     'Earliest End']
+        self.operation_times[ac_index, op_index]['Scheduled End'] = start + self.aircraft[ac_index]['Processing Times'][
+            op_index]
 
     def update_time_conflicts(self, ac_index, op_index, mach_index):
         """
@@ -312,9 +357,11 @@ class DJSPEnv(gym.Env):
             if ac == ac_index:
                 continue
             # if time overlaps, ensure time conflict = 1 unless
-            if self.operation_times[ac, op_index]['Earliest Start'] <= self.operation_times[ac_index, op_index]['Scheduled End'] and \
-               self.operation_times[ac, op_index]['Earliest Start'] <= self.operation_times[ac_index, op_index]['Scheduled End'] and \
-               not self.time_conflicts[op_index, ac, ac_index] and not self.time_conflicts[op_index, ac_index, ac]:
+            if self.operation_times[ac, op_index]['Earliest Start'] <= self.operation_times[ac_index, op_index][
+                'Scheduled End'] and \
+                    self.operation_times[ac, op_index]['Earliest Start'] <= self.operation_times[ac_index, op_index][
+                'Scheduled End'] and \
+                    not self.time_conflicts[op_index, ac, ac_index] and not self.time_conflicts[op_index, ac_index, ac]:
                 self.time_conflicts[op_index, ac, ac_index] = 1
                 self.time_conflicts[op_index, ac_index, ac] = 1
             else:
@@ -337,19 +384,48 @@ class DJSPEnv(gym.Env):
         # determine new earliest availability for machine at mach_index
         self.time_availability[ac_index, op_index, mach_index] = 0
         for aircraft in range(self.n_aircraft):
-            self.time_availability[aircraft, op_index, mach_index] = self.operation_times[ac_index, op_index]['Scheduled End']
+            self.time_availability[aircraft, op_index, mach_index] = self.operation_times[ac_index, op_index][
+                'Scheduled End']
 
     def update_delay(self, ac_index, op_index):
         """
         Updates delay dictionary, adding delay in minutes to list of delays, adding to total delay and recalculating
-        the average delay over all delayes operations
+        the average delay over all delayed operations
         """
         delay = int(self.operation_times[ac_index, op_index]['Scheduled End'] - \
-                self.operation_times[ac_index, op_index]['Earliest End'])
+                    self.operation_times[ac_index, op_index]['Earliest End'])
         if delay != 0:
-            self.delays['Delays'].append(delay)
-            self.delays['Total Delay'] += delay
-            self.delays['Average Delay'] = np.mean(self.delays['Delays'])
+            # Add delay to operative delays list and total operative delay
+            self.delays['Operative Delays'][ac_index, op_index] = delay
+            self.delays['Total Operative Delay'] += delay
+
+            # update delay for following operations
+            self.update_following_delays(ac_index, op_index)
+            self.update_aircraft_delay(ac_index, op_index)
+
+    def update_following_delays(self, ac_index, op_index):
+        """
+        Updates the delay for all operations following the operation at op_index for the aircraft at ac_index
+        """
+        following_ops = self.following(op_index)
+        for op in following_ops:
+            if self.operation_times[ac_index, op]['Scheduled Start']:
+                self.operation_times[ac_index, op_index]['Current Delay'] =
+
+    def update_aircraft_delay(self, ac_index, op_index):
+        """
+        Identifies whether aircraft is delayed by the delayed assignment of an operation.
+        """
+
+        dep = self.aircraft[ac_index]['STD']
+        if not following_ops:
+            # evaluate if the delayed operation causes aircraft delay
+            if self.operation_times[ac_index, ]['Scheduled End']
+        else:
+    # evaluate for foll
+
+
+    # UTILITY FUNCTIONS -----------------------------------------------------------------------------------------------
 
     def convert_action_to_assignment(self, action_index):
         """
@@ -380,7 +456,7 @@ class DJSPEnv(gym.Env):
         precedence_idxs = np.where(self.parallel_mask[:, op_idx])[0]
 
         # aircraft ETA is the earliest start time with no preceding ops
-        if precedence_idxs.size == 0:
+        if not precedence_idxs.size:
             return self.aircraft[ac_idx]['ETA']
         else:
             # check that the operation is not a parallel task (parallel when [op,idx]==1 and [idx,op]==1)
@@ -396,11 +472,25 @@ class DJSPEnv(gym.Env):
 
             return earliest_start
 
-    def calculate_max_delay(self):
+    def following(self, op_idx):
+        # identify potential following operations - where the column
+        following_idxs = np.where(self.parallel_mask[op_idx, :])[0]
+        following_ops = []
+
+        if not following_idxs.size:
+            return None
+        for following_op in following_idxs:
+            if not self.parallel_mask[following_op, op_idx]:
+                following_ops.append(following_op)
+
+        return following_ops
+
+    def calculate_max_delays(self):
         """
-        Calculates maximum possible delay for the entire schedule delta, used to define the reward function
+        Calculates maximum possible delay delta for each aircraft in the schedule delta,
+        used to define the reward function uniquely for each aircraft
         """
-        delta = 0
+        delta = []
         for ac in self.aircraft:
-            delta += minutes_to_midnight(self.aircraft[ac]['STD'])
+            delta.append(minutes_to_midnight(self.aircraft[ac]['STD']))
         return delta
