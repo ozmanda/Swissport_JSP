@@ -13,17 +13,16 @@ if __name__ == '__main__':
 
     env = DJSPEnv(instance_path=args.instancepath)
     observation = env.reset()
-    print(f'INITIAL ASSIGNMENT:\n{env.assignment}')
+    # print(f'INITIAL ASSIGNMENT:\n{env.assignment}')
 
     for t in range(100):
-        print(t)
-        print(f'Availability:\n{env.availability.astype(int)}')
+        # print(f'Availability:\n{env.availability.astype(int)}')
         action = env.sample_action()
         observation, reward, done = env.step(action)
-        print(f'Assignment:\n{env.assignment.astype(int)}')
-        print(f'Unassigned operations: {observation["unassigned operations"]}\n\n')
+        # print(f'Assignment:\n{env.assignment.astype(int)}')
+        # print(f'Unassigned operations: {observation["unassigned operations"]}\n\n')
         if done:
-            print(f'finished after {t} timesteps')
+            print(f'finished after {t+1} timesteps')
             # print(f'Assignment: \n{env.assignment}')
             break
         if t == 99:
