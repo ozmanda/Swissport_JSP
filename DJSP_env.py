@@ -11,6 +11,7 @@ alpha = 0.1
 phi = 0.001
 delta = 0
 
+
 class DJSPEnv(gym.Env):
     """
     An operation scheduling environment for OpenAI gym, developed specifically for the scheduling of ground handling
@@ -23,10 +24,10 @@ class DJSPEnv(gym.Env):
         # set global variables if provided
         if a:
             global alpha
-            alpha=a
+            alpha = a
         if p:
             global phi
-            phi=p
+            phi = p
 
         # declare variables which are required to store information from the instance specification
         self.n_aircraft = 0
@@ -48,7 +49,7 @@ class DJSPEnv(gym.Env):
         self.availability = np.zeros(shape=(self.n_aircraft, self.n_operations, self.n_machines), dtype=bool)
         self.operation_pointers = np.zeros(shape=(self.n_operations, 2), dtype=list)
         self.operation_times = np.empty(shape=(self.n_aircraft, self.n_operations), dtype=dict)
-        self.time_conflicts = np.empty(shape=(self.n_operations, self.n_aircraft, self.n_aircraft), dtype=bool)
+        # self.time_conflicts = np.empty(shape=(self.n_operations, self.n_aircraft, self.n_aircraft), dtype=bool)
         self.delays = {'Operative Delays': np.zeros(shape=(self.n_aircraft, self.n_operations)),
                        'Total Operative Delay': 0,
                        'Aircraft Delays': np.zeros(shape=self.n_aircraft),
@@ -113,6 +114,8 @@ class DJSPEnv(gym.Env):
         reward = self._calculate_reward(aircraft_index)
 
         # terminate only when no machine-operation assignments are available / feasible
+        print(self.availability.astype(int))
+        print(self.availability.any())
         if self.availability.any():
             terminate = False
         else:
@@ -285,30 +288,30 @@ class DJSPEnv(gym.Env):
                                                              'Current Delay': 0}
 
         # use operation times to initialise time conflict matrix
-        self._init_time_conflicts()
+        # self._init_time_conflicts()
 
-    def _init_time_conflicts(self):
-        """
-        Per operation, a [n_aircraft x n_aircraft]-matrix is created showing which operations from aircraft are in
-        temporal conflict with one another. This is done per operation type, so conflict between operations of
-        different types are not considered.
-        :return:
-        """
-        for op in range(0, self.n_operations):
-            for a1 in range(0, self.n_aircraft):
-                for a2 in range(0, self.n_aircraft):
-                    if self.time_conflicts[op, a1, a2]:
-                        continue
-                    elif a1 == a2:
-                        self.time_conflicts[op, a1, a2] = 1
-                    else:
-                        x = 5
-                        if self.operation_times[a1, op]['Earliest Start'] <= self.operation_times[a2, op][
-                            'Earliest End'] and \
-                                self.operation_times[a2, op]['Earliest Start'] <= self.operation_times[a1, op][
-                            'Earliest End']:
-                            self.time_conflicts[op, a1, a2] = 1
-                            self.time_conflicts[op, a2, a1] = 1
+    # def _init_time_conflicts(self):
+    #     """
+    #     Per operation, a [n_aircraft x n_aircraft]-matrix is created showing which operations from aircraft are in
+    #     temporal conflict with one another. This is done per operation type, so conflict between operations of
+    #     different types are not considered.
+    #     :return:
+    #     """
+    #     for op in range(0, self.n_operations):
+    #         for a1 in range(0, self.n_aircraft):
+    #             for a2 in range(0, self.n_aircraft):
+    #                 if self.time_conflicts[op, a1, a2]:
+    #                     continue
+    #                 elif a1 == a2:
+    #                     self.time_conflicts[op, a1, a2] = 1
+    #                 else:
+    #                     x = 5
+    #                     if self.operation_times[a1, op]['Earliest Start'] <= self.operation_times[a2, op][
+    #                         'Earliest End'] and \
+    #                             self.operation_times[a2, op]['Earliest Start'] <= self.operation_times[a1, op][
+    #                         'Earliest End']:
+    #                         self.time_conflicts[op, a1, a2] = 1
+    #                         self.time_conflicts[op, a2, a1] = 1
 
     # UPDATE FUNCTIONS ------------------------------------------------------------------------------------------------
 
@@ -333,7 +336,7 @@ class DJSPEnv(gym.Env):
         if delay:
             self.update_latest_start(operation_index, aircraft_index)
             self.update_earliest_start(operation_index, aircraft_index, delay)
-            self.update_time_conflicts(aircraft_index, operation_index, machine_index)
+            # self.update_time_conflicts(aircraft_index, operation_index, machine_index)
             self.update_delay(aircraft_index, operation_index, delay)
 
         # update time availability for conflicting operations and action mask for next action selection
@@ -341,7 +344,6 @@ class DJSPEnv(gym.Env):
         self.update_action_mask()
 
         return aircraft_index
-
 
     def update_assignment(self, ac_idx, op_idx, mach_idx):
         """
@@ -352,76 +354,66 @@ class DJSPEnv(gym.Env):
         delay = self.update_scheduled_times(ac_idx, op_idx, mach_idx)
         return delay
 
-    def update_availability(self, ac_index, op_index):
-        """
-        For a sampled action, the availability matrix is adjusted to show the operation at op_index as unavailable for
-        assignment to all other machines.
-        """
-        self.availability[ac_index, op_index, :] = 0
-        # conflict_aircraft_idxs = np.where(self.time_conflicts[op_index, ac_index, :])[0]
-        # for aircraft_idx in conflict_aircraft_idxs:
-        #     self.availability[aircraft_idx, op_index, mach_index] = 0
-
     def update_time_availability(self, ac_idx, op_idx, mach_idx):
         """
-        Updates the time availability matrices (both Timestamp and discrete time matrices). Also automatically updates
-        the time conflict matrix.
+        Updates the time availability matrix.
         """
-        # make assigned operation unavailable for all machines
-        # self.time_availability[ac_index, op_index, :] = 0
-        # self.time_availability_discrete[ac_index, op_index, :] = 0
+        # Identify aircraft with earliest time availabilty for the operation at op_idx at the machine at mach_idx
+        ac_idxs = np.where(self.time_availability[:, op_idx, mach_idx])[0]
+        scheduled_end = self.operation_times[ac_idx, op_idx]['Scheduled End']
+        scheduled_start = self.operation_times[ac_idx, op_idx]['Scheduled Start']
 
-        # identify aircraft with operations which overlap in time with the assigned operation
-        conflict_aircraft_idxs = np.where(self.time_conflicts[op_idx, ac_idx, :])[0]
-        #
-        for aircraft_idx in conflict_aircraft_idxs:
-            if self.operation_times[aircraft_idx, op_idx]['Latest Start']:
-                if self.operation_times[aircraft_idx, op_idx]['Latest Start'] < self.operation_times[ac_idx, op_idx]['Scheduled End']:
-                    self.time_availability[aircraft_idx, op_idx, mach_idx] = 0
-                    self.availability[aircraft_idx, op_idx, mach_idx] = 0
+        for ac in ac_idxs:
+            if self.time_availability[ac, op_idx, mach_idx] <= scheduled_end and self.time_availability[
+                ac, op_idx, mach_idx] + self.aircraft[ac]['Processing Times'][op_idx] >= scheduled_start:
+                if self.operation_times[ac, op_idx]['Latest Start']:
+                    if self.operation_times[ac, op_idx]['Latest Start'] < scheduled_end:
+                        self.time_availability[ac, op_idx, mach_idx] = 0
+                        self.availability[ac, op_idx, mach_idx] = 0
+                    else:
+                        self.time_availability[ac, op_idx, mach_idx] = scheduled_end
                 else:
-                    self.time_availability[aircraft_idx, op_idx, mach_idx] = \
-                        self.operation_times[ac_idx, op_idx]['Scheduled End']
-            else:
-                self.time_availability[aircraft_idx, op_idx, mach_idx] = \
-                    self.operation_times[ac_idx, op_idx]['Scheduled End']
-            # self.time_availability_discrete[aircraft_idx, op_index, mach_index] = \
-            #     minutes_since_midnight(self.operation_times[aircraft_idx, op_index, mach_index]['Scheduled End'])
+                    self.time_availability[ac, op_idx, mach_idx] = scheduled_end
 
     def update_scheduled_times(self, ac_index, op_index, mach_index):
         """
         Updates the scheduled start and end times and returns the delay
         """
         start = self.time_availability[ac_index, op_index, mach_index]
+        if start == 0:
+            x = 5
         self.operation_times[ac_index, op_index]['Scheduled Start'] = start
-        self.operation_times[ac_index, op_index]['Scheduled End'] = start + self.aircraft[ac_index]['Processing Times'][op_index]
-        delay_td = self.operation_times[ac_index, op_index]['Scheduled End'] - self.operation_times[ac_index, op_index]['Earliest End']
-        return int(delay_td.total_seconds()/60)
+        try:
+            self.operation_times[ac_index, op_index]['Scheduled End'] = start + self.aircraft[ac_index]['Processing Times'][
+                op_index]
+        except TypeError:
+            x = 5
+        delay_td = self.operation_times[ac_index, op_index]['Scheduled End'] - self.operation_times[ac_index, op_index][
+            'Earliest End']
+        return int(delay_td.total_seconds() / 60)
 
-    def update_time_conflicts(self, ac_index, op_index, mach_index):
-        """
-        Updates conflict matrix for a given action (aircraft, operation and machine indices)
-        """
-        # only check for aircraft whose operation at op_index can be assigned to this machine (gives aircraft indices)
-        feasible_assignments = np.where(self.availability[:, op_index, mach_index])[0]
-
-        for ac in feasible_assignments:
-            if ac == ac_index:
-                continue
-            # if time overlaps, ensure time conflict = 1 unless
-            if self.operation_times[ac, op_index]['Earliest Start'] <= self.operation_times[ac_index, op_index][
-                'Scheduled End'] and \
-                    self.operation_times[ac, op_index]['Earliest End'] >= self.operation_times[ac_index, op_index][
-                'Scheduled Start']:
-                if not self.time_conflicts[op_index, ac, ac_index]:
-                    self.time_conflicts[op_index, ac, ac_index] = 1
-                if not self.time_conflicts[op_index, ac_index, ac]:
-                    self.time_conflicts[op_index, ac_index, ac] = 1
-            else:
-                if self.time_conflicts[op_index, ac, ac_index]:
-                    self.time_conflicts[op_index, ac, ac_index] = 0
-                if self.time_conflicts[op_index, ac_index, ac]:
-                    self.time_conflicts[op_index, ac_index, ac] = 0
+    # def update_time_conflicts(self, ac_index, op_index, mach_index):
+    #     """
+    #     Updates conflict matrix for a given action (aircraft, operation and machine indices)
+    #     """
+    #     # only check for aircraft whose operation at op_index can be assigned to this machine (gives aircraft indices)
+    #     feasible_assignments = np.where(self.availability[:, op_index, mach_index])[0]
+    #
+    #     for ac in feasible_assignments:
+    #         if ac == ac_index:
+    #             continue
+    #         # if time overlaps, ensure time conflict = 1 unless
+    #         if self.operation_times[ac, op_index]['Earliest Start'] <= self.operation_times[ac_index, op_index][
+    #             'Scheduled End'] and \
+    #                 self.operation_times[ac, op_index]['Earliest End'] >= self.operation_times[ac_index, op_index][
+    #             'Scheduled Start']:
+    #             if not self.time_conflicts[op_index, ac, ac_index]:
+    #                 self.time_conflicts[op_index, ac, ac_index] = 1
+    #                 self.time_conflicts[op_index, ac_index, ac] = 1
+    #         else:
+    #             if self.time_conflicts[op_index, ac, ac_index]:
+    #                 self.time_conflicts[op_index, ac, ac_index] = 0
+    #                 self.time_conflicts[op_index, ac_index, ac] = 0
 
     def update_latest_start(self, op_idx, ac_idx):
         """
@@ -459,7 +451,6 @@ class DJSPEnv(gym.Env):
             # update prior operation index list
             prior_op_idxs = next_prior_op_idxs
 
-
     def update_earliest_start(self, op_idx, ac_idx, delay):
         """
         When an operation is assigned with delay, the earliest start of all following operations is updated, until the
@@ -480,7 +471,7 @@ class DJSPEnv(gym.Env):
                     if not self.operation_times[ac_idx, op_idx]['Scheduled Start']:
                         earliest_start = self.operation_times[ac_idx, op_idx]['Earliest Start'] + \
                                          self.aircraft[ac_idx]['Processing Times'][following_op]
-                        self.operation_times['Earliest Start'] = earliest_start
+                        self.operation_times[ac_idx, op_idx]['Earliest Start'] = earliest_start
                         self.operation_times[ac_idx, op_idx]['Current Delay'] = delay
 
                         # if the operation also has prior operations, append to the dictionary list for next iteration
@@ -637,6 +628,30 @@ class DJSPEnv(gym.Env):
             if end > latest_end:
                 latest_end = end
 
-        return latest_end - std
+        return int((latest_end - std).total_seconds() / 60)
 
+    def determine_earliest_availability(self, op_index, ac_index, mach_index):
+        """
+        When an operation is assigned with delay and a time conflict is freed, this function re-evaluates the machine's
+        earliest time of availabilty for the operation at op_index and machine at mach_index.
+        """
+        earliest_start = None
+        latest_start = None
+        earliest_availability = earliest_start
 
+        assigned_ac = np.where(self.assignment[:, op_index, mach_index])[0]
+        for ac in assigned_ac:
+            if self.operation_times[ac, op_index]['Scheduled End'] <= earliest_start:
+                # case that a following assigned operation has set a latest start point
+                if latest_start:
+                    earliest_availability
+
+        return 5
+
+    def evaluate_schedule(self):
+        """
+        Checks the schedule for errors
+        """
+        # for each machine, check that the assigned operations are not in conflict with one another
+        for machine in range(self.n_machines):
+            operation = np.where(self.assignment)
