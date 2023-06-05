@@ -68,10 +68,10 @@ class DJSPEnv(gym.Env):
         self.last_operations = np.where(self.operation_pointers[:, 1] == None)[0]
 
         # save empty matrices for easy environment resetting
-        self.init_assignment = self.assignment
-        self.init_availability = self.availability
-        self.init_operation_times = self.operation_times
-        self.init_time_availability = self.time_availability
+        self.init_assignment = self.assignment.copy()
+        self.init_availability = self.availability.copy()
+        self.init_operation_times = self.operation_times.copy()
+        self.init_time_availability = self.time_availability.copy()
         # self.init_time_availability_discrete = self.time_availability_discrete
 
         # initialise action and observation space
@@ -84,11 +84,11 @@ class DJSPEnv(gym.Env):
         episode (independent of previous ones) may start.
         """
         # Reset assignment, availability and operation time matrices
-        self.assignment = self.init_assignment
-        self.availability = self.init_availability
-        self.time_availability = self.init_time_availability
+        self.assignment = self.init_assignment.copy()
+        self.availability = self.init_availability.copy()
+        self.time_availability = self.init_time_availability.copy()
         # self.time_availability_discrete = self.init_time_availability_discrete
-        self.operation_times = self.init_operation_times
+        self.operation_times = self.init_operation_times.copy()
 
         # reset observation space
         self.current_observation = {
@@ -114,8 +114,6 @@ class DJSPEnv(gym.Env):
         reward = self._calculate_reward(aircraft_index)
 
         # terminate only when no machine-operation assignments are available / feasible
-        print(self.availability.astype(int))
-        print(self.availability.any())
         if self.availability.any():
             terminate = False
         else:
@@ -334,8 +332,8 @@ class DJSPEnv(gym.Env):
 
         # if operation is delayed, update time conflicts and set latest/earliest start times for prior/following ops
         if delay:
-            self.update_latest_start(operation_index, aircraft_index)
-            self.update_earliest_start(operation_index, aircraft_index, delay)
+            self.update_prior_ops(operation_index, aircraft_index)
+            self.update_following_ops(operation_index, aircraft_index, delay)
             # self.update_time_conflicts(aircraft_index, operation_index, machine_index)
             self.update_delay(aircraft_index, operation_index, delay)
 
@@ -374,6 +372,16 @@ class DJSPEnv(gym.Env):
                         self.time_availability[ac, op_idx, mach_idx] = scheduled_end
                 else:
                     self.time_availability[ac, op_idx, mach_idx] = scheduled_end
+
+        # adjust time availabiltiy of dependent, prior aircraft
+        prior_ops = np.where(self.parallel_mask[:, op_idx])[0]
+        for prior_op in prior_ops:
+            mach_idxs = np.where(self.availability[ac_idx, op_idx, :])[0]
+            for m_idx in mach_idxs:
+                if m_idx == mach_idx:
+                    continue
+                else:
+                    self.time_availability[ac_idx, prior_op, ]
 
     def update_scheduled_times(self, ac_index, op_index, mach_index):
         """
@@ -415,7 +423,7 @@ class DJSPEnv(gym.Env):
     #                 self.time_conflicts[op_index, ac, ac_index] = 0
     #                 self.time_conflicts[op_index, ac_index, ac] = 0
 
-    def update_latest_start(self, op_idx, ac_idx):
+    def update_prior_ops(self, op_idx, ac_idx):
         """
         When an operation is assigned with delay, the latest start of all prior operations is updated, until the first
         operation in the sequence.
@@ -438,11 +446,11 @@ class DJSPEnv(gym.Env):
                         self.operation_times[ac_idx, prior_op_idx]['Latest Start'] = latest_start
 
                         # check for machines that are only available after the latest start time and remove them
-                        mach_idxs = np.where(self.availability[ac_idx, op_idx, :])[0]
+                        mach_idxs = np.where(self.availability[ac_idx, prior_op_idx, :])[0]
                         for mach_idx in mach_idxs:
-                            if self.time_availability[ac_idx, op_idx, mach_idx] > latest_start:
-                                self.time_availability[ac_idx, op_idx, mach_idx] = 0
-                                self.availability[ac_idx, op_idx, mach_idx] = 0
+                            if self.time_availability[ac_idx, prior_op_idx, mach_idx] > latest_start:
+                                self.time_availability[ac_idx, prior_op_idx, mach_idx] = 0
+                                self.availability[ac_idx, prior_op_idx, mach_idx] = 0
 
                         # if the operation also has prior operations, append to the dictionary list for next iteration
                         if self.operation_pointers[prior_op_idx, 0]:
@@ -451,7 +459,7 @@ class DJSPEnv(gym.Env):
             # update prior operation index list
             prior_op_idxs = next_prior_op_idxs
 
-    def update_earliest_start(self, op_idx, ac_idx, delay):
+    def update_following_ops(self, op_idx, ac_idx, delay):
         """
         When an operation is assigned with delay, the earliest start of all following operations is updated, until the
         last operation in the sequence. For the operations following a delayed assignment, the current delay is saved.
@@ -465,16 +473,25 @@ class DJSPEnv(gym.Env):
             next_following_ops = {}
 
             # per operation, iterate through all following operations
-            for key in following_op_idxs.keys():
-                for following_op in following_op_idxs[key]:
-                    # check that the op is unassigned, otherwise following ops are determined by the already assigned op
-                    if not self.operation_times[ac_idx, op_idx]['Scheduled Start']:
-                        earliest_start = self.operation_times[ac_idx, op_idx]['Earliest Start'] + \
-                                         self.aircraft[ac_idx]['Processing Times'][following_op]
-                        self.operation_times[ac_idx, op_idx]['Earliest Start'] = earliest_start
-                        self.operation_times[ac_idx, op_idx]['Current Delay'] = delay
+            for prior_op in following_op_idxs.keys():
+                # calculate earliest end of the prior operation
+                earliest_start = self.operation_times[ac_idx, prior_op]['Delayed Start'] + \
+                                         self.aircraft[ac_idx]['Processing Times'][prior_op]
 
-                        # if the operation also has prior operations, append to the dictionary list for next iteration
+                # iterate through all operations dependant on the prior op
+                for following_op in following_op_idxs[prior_op]:
+                    # check that the following op is unassigned, otherwise all ops after are already determined
+                    if not self.operation_times[ac_idx, following_op]['Scheduled Start']:
+                        self.operation_times[ac_idx, following_op]['Delayed Start'] = earliest_start
+                        self.operation_times[ac_idx, following_op]['Current Delay'] = delay
+
+                        # adjust time availability for available machines
+                        available_machines = np.where(self.time_availability[ac_idx, following_op, :])
+                        for mach in available_machines:
+                            if self.time_availability[ac_idx, following_op, mach] < earliest_start:
+                                self.time_availability[ac_idx, following_op, mach] = earliest_start
+
+                        # if the operation also has following operations, append to the dict list for next iteration
                         if self.operation_pointers[following_op, 1]:
                             following_op_idxs[following_op] = self.operation_pointers[following_op, 1]
 
@@ -487,17 +504,6 @@ class DJSPEnv(gym.Env):
         required by the .sample() function
         """
         self.action_mask = np.ravel(self.availability).astype(np.int8)
-
-    def update_timeavailability(self, ac_index, op_index, mach_index):
-        """
-        Updates the timeavailability matrix cfor the machine at mach_index, setting it to 0 for the assigned operation
-        at op_index and adjusting the earliest times for all other operations.
-        """
-        # determine new earliest availability for machine at mach_index
-        self.time_availability[ac_index, op_index, mach_index] = 0
-        for aircraft in range(self.n_aircraft):
-            self.time_availability[aircraft, op_index, mach_index] = self.operation_times[ac_index, op_index][
-                'Scheduled End']
 
     def update_delay(self, ac_index, op_index, delay):
         """
@@ -512,26 +518,6 @@ class DJSPEnv(gym.Env):
         ac_delay = self.evaluate_aircraft_delay(ac_index)
         self.delays['Aircraft Delays'][ac_index] = ac_delay
         self.delays['Total Aircraft Delay'] = np.sum(self.delays['Aircraft Delays'])
-
-    def update_following_delays(self, ac_index, op_index, delay):
-        """
-        Updates the delay for all operations following the operation at op_index for the aircraft at ac_index
-        """
-        following = True
-        prev_idx = op_index
-        while following:
-            if self.operation_pointers[prev_idx, 1]:
-                following_idx = self.operation_pointers[prev_idx, 1]
-                if not self.operation_times[ac_index, following_idx]['Scheduled Start']:
-                    # set current delay and update indices for next iteration
-                    self.operation_times[ac_index, following_idx]['Current Delay'] = delay
-                    prev_idx += 1
-                    following_idx += 1
-                else:
-                    # delay for all following operations is given by the already scheduled operation
-                    following = False
-            else:
-                following = False
 
     # UTILITY FUNCTIONS -----------------------------------------------------------------------------------------------
 

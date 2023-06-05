@@ -14,22 +14,24 @@ if __name__ == '__main__':
 
     env = DJSPEnv(instance_path=args.instancepath)
 
-    for episode in range(1, args.episodes):
-        print(f'Episode {episode} / {args.episodes}......')
+    for episode in range(0, args.episodes):
+        print(f'\n\nEPISODE {episode+1} / {args.episodes}......')
         # reset the environment and set terminated to False
         observation = env.reset()
         terminated = False
         t = 0
 
         while not terminated:
-            print(f'    iteration {t}........................')
+            print(f'\n    iteration {t}........................')
             action = env.sample_action()
             observation, reward, terminated = env.step(action)
+            print(env.time_availability)
+            print(env.operation_times)
             t += 1
 
 
         # evaluate episode results
-        print(f'Episode {episode}: {env.rewards["total reward"]}')
+        print(f'    reward: {env.rewards["total reward"]}')
         render_schedule(env.assignment, env.machines_per_op, env.aircraft, env.operation_times)
 
 
