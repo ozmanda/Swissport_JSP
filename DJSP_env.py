@@ -3,11 +3,8 @@ import pandas as pd
 from pandas import to_datetime, Timedelta
 import gymnasium as gym
 from gymnasium.spaces import Box, Discrete, Dict, MultiBinary, MultiDiscrete
-# from gym.spaces.discrete import Discrete as discrete_action
-# from gym.spaces import Dict, MultiBinary
 from pandas import to_datetime
 from utils import minutes_to_midnight
-from gymnasium.wrappers import FlattenObservation
 
 # GLOBAL MODEL PARAMETERS
 alpha = 0.1
@@ -43,6 +40,7 @@ class DJSPEnv(gym.Env):
         # load instance and initialise relevant matrices
         if instance_path:
             self.load_instance(instance_path)
+            self.dim = self.n_aircraft * self.n_operations * self.n_machines
 
         # declare remaining variables
         self.assignment = np.zeros(shape=(self.n_aircraft, self.n_operations, self.n_machines), dtype=np.uint8)
@@ -78,6 +76,7 @@ class DJSPEnv(gym.Env):
         self.init_operation_times = self.operation_times.copy()
         self.init_time_availability = self.time_availability.copy()
         self.init_delays = self.delays.copy()
+        self.init_action_mask = self.action_mask.copy()
         # self.init_time_availability_discrete = self.time_availability_discrete
 
         # initialise action and observation space
@@ -129,7 +128,12 @@ class DJSPEnv(gym.Env):
         self.delays = self.init_delays.copy()
 
         # reset observation space
-        self.current_observation = np.array(self.assignment, dtype=np.uint8)
+        # self.current_observation = np.array(self.assignment, dtype=np.uint8)
+        self.current_observation = np.zeros(shape=(2, self.dim))
+        self.action_mask = self.init_action_mask.copy()
+        self.current_observation[1, :] = self.action_mask
+        self.rewards = {'per aircraft': np.zeros(shape=self.n_aircraft),
+                        'total reward': 0}
         self.steps = 0
         # self.current_observation = {
         #     'assignment matrix': self.init_assignment,
@@ -154,26 +158,18 @@ class DJSPEnv(gym.Env):
             # update observation
             self.current_observation = self._transform_observation()
             reward = self._calculate_reward(aircraft_index)
-
-            # terminate only when no machine-operation assignments are available / feasible
-            if self.availability.any():
-                terminate = False
-            else:
-                terminate = True
-
-            # truncate if the max number of steps has been exceeded
-            if self.steps == self.n_aircraft * self.n_operations * 1000:
-                truncated = True
-            else:
-                truncated = False
-
-            return self.current_observation, reward, terminate, False, {}
         else:
-            if self.steps == self.n_aircraft * self.n_operations * 1000:
-                truncated = True
-            else:
-                truncated = False
-            return self.current_observation, self.rewards['total reward'], False, truncated, {}
+            reward = self._calculate_reward(0, invalid=True)
+
+        truncated = True if self.steps == self.n_aircraft * self.n_operations * 100000 else False
+        terminated = False if self.availability.any() else True
+        self.steps += 1
+
+        # if not self.steps%20:
+        #     if self.assignment.any():
+        #         print(f'{self.assignment}\n\n\n')
+
+        return self.current_observation, reward, terminated, truncated, {}
 
     def sample_action(self):
         """ Samples action under consideration of machine availability (flattened and converted from bool to np.int8)"""
@@ -181,36 +177,49 @@ class DJSPEnv(gym.Env):
 
     def _transform_observation(self):
         """ Generates the new observation """
-        self.current_observation = np.array(self.assignment, dtype=np.uint8)
+        obs = np.zeros(shape=(2, self.dim), dtype=np.uint8)
+        obs[0, :] = np.ravel(self.assignment)
+        obs[1, :] = self.action_mask
+        self.current_observation = obs
+        # self.current_observation = np.array(self.assignment, dtype=np.uint8)
         # self.current_observation['total aircraft delay'] = Discrete(self.delays['Total Aircraft Delay'].astype(np.uint8))
         # new_observation = {
         #     'assignment matrix': np.array(self.assignment, dtype=int),
         #     'total aircraft delay': int(self.delays['Total Aircraft Delay'])
         # }
+        # self.current_observation = new_observation
         return self.current_observation
         # return new_observation
 
-    def _calculate_reward(self, aircraft_index, function='linear'):
+    def _calculate_reward(self, aircraft_index, function='linear', invalid=False):
         """ Calculates the value of the reward function. """
-        delay = self.delays['Aircraft Delays'][aircraft_index]
-        # calculate the aircraft reward for the assigned
-        if delay == 0:
-            self.rewards['per aircraft'][aircraft_index] = 1
-            self.rewards['total reward'] = np.sum(self.rewards['per aircraft'])
-            return self.rewards['total reward']
-        elif delay < 15:
-            self.rewards['per aircraft'][aircraft_index] = self.pre_delay_reward_function(delay)
-            self.rewards['total reward'] = np.sum(self.rewards['per aircraft'])
-            return self.rewards['total reward']
-        elif delay >= 15:
+        if invalid:
             if function == 'linear':
-                self.rewards['per aircraft'][aircraft_index] = self.linear_reward(delay)
-                self.rewards['total reward'] = np.sum(self.rewards['per aircraft'])
-                return self.rewards['total reward']
+                reward = self.linear_reward(self.delaydim)
             elif function == 'exponential':
-                self.rewards['per aircraft'][aircraft_index] = self.exponential_reward(delay)
-                self.rewards['total reward'] = np.sum(self.rewards['per aircraft'])
-                return self.rewards['total reward']
+                reward = self.exponential_reward(self.delaydim)
+            return 0
+        else:
+            delay = self.delays['Aircraft Delays'][aircraft_index]
+            reward = 0
+            # calculate the aircraft reward for the assigned
+            if delay == 0:
+                reward = 1
+            elif delay < 15:
+                # reward = self.pre_delay_reward_function(delay)
+                reward = 0.5
+            elif delay >= 15:
+                if function == 'linear':
+                    # reward = self.linear_reward(delay)
+                    reward = 0
+                elif function == 'exponential':
+                    # reward = self.exponential_reward(delay)
+                    reward = 0
+
+            self.rewards['per aircraft'][aircraft_index] = reward
+            self.rewards['total reward'] = np.sum(self.rewards['per aircraft'])
+            # return reward
+            return reward
 
     def pre_delay_reward_function(self, delay):
         return (alpha / 15) * delay
@@ -253,11 +262,10 @@ class DJSPEnv(gym.Env):
           2. total aircraft delay
         """
         delaydim = np.sum(self.max_delays)
-        self.observation_space = MultiBinary([self.n_aircraft, self.n_operations, self.n_machines])
+        self.observation_space = MultiBinary([2, self.dim])
         # self.observation_space = Dict(
         #     {
-        #     'assignment matrix': MultiBinary([self.n_aircraft, self.n_operations, self.n_machines]),
-        #     # 'total aircraft delay': Box(low=0, high=np.sum(self.max_delays), shape=(1,), dtype=int)
+        #         'assignment matrix': MultiBinary([self.n_aircraft, self.n_operations, self.n_machines]),
         #         'total aircraft delay': Discrete(delaydim)
         #     }
         # )
@@ -458,27 +466,30 @@ class DJSPEnv(gym.Env):
             next_following_ops = {}
 
             # per operation, iterate through all following operations
-            for prior_op in following_op_idxs.keys():
-                # calculate earliest end of the prior operation
-                earliest_start = self.operation_times[ac_idx, prior_op]['Delayed Start'] + \
-                                         self.aircraft[ac_idx]['Processing Times'][prior_op]
+            try:
+                for prior_op in following_op_idxs.keys():
+                    # calculate earliest end of the prior operation
+                    earliest_start = self.operation_times[ac_idx, prior_op]['Delayed Start'] + \
+                                     self.aircraft[ac_idx]['Processing Times'][prior_op]
 
-                # iterate through all operations dependant on the prior op
-                for following_op in following_op_idxs[prior_op]:
-                    # check that the following op is unassigned, otherwise all ops after are already determined
-                    if not self.operation_times[ac_idx, following_op]['Scheduled Start']:
-                        self.operation_times[ac_idx, following_op]['Delayed Start'] = earliest_start
-                        self.operation_times[ac_idx, following_op]['Current Delay'] = delay
+                    # iterate through all operations dependant on the prior op
+                    for following_op in following_op_idxs[prior_op]:
+                        # check that the following op is unassigned, otherwise all ops after are already determined
+                        if not self.operation_times[ac_idx, following_op]['Scheduled Start']:
+                            self.operation_times[ac_idx, following_op]['Delayed Start'] = earliest_start
+                            self.operation_times[ac_idx, following_op]['Current Delay'] = delay
 
-                        # adjust time availability for available machines
-                        available_machines = np.where(self.time_availability[ac_idx, following_op, :])[0]
-                        for mach in available_machines:
-                            if self.time_availability[ac_idx, following_op, mach] < earliest_start:
-                                self.time_availability[ac_idx, following_op, mach] = earliest_start
+                            # adjust time availability for available machines
+                            available_machines = np.where(self.time_availability[ac_idx, following_op, :])[0]
+                            for mach in available_machines:
+                                if self.time_availability[ac_idx, following_op, mach] < earliest_start:
+                                    self.time_availability[ac_idx, following_op, mach] = earliest_start
 
-                        # if the operation also has following operations, append to the dict list for next iteration
-                        if self.operation_pointers[following_op, 1]:
-                            following_op_idxs[following_op] = self.operation_pointers[following_op, 1]
+                            # if the operation also has following operations, append to the dict list for next iteration
+                            if self.operation_pointers[following_op, 1]:
+                                following_op_idxs[following_op] = self.operation_pointers[following_op, 1]
+            except RuntimeError:
+                print(following_op_idxs)
 
             # update following operation index list
             following_op_idxs = next_following_ops
