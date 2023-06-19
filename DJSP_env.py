@@ -164,7 +164,7 @@ class DJSPEnv(gym.Env):
         else:
             reward = self._calculate_reward(0, invalid=True)
 
-        truncated = True if self.steps == self.n_aircraft * self.n_operations * 100000 else False
+        truncated = True if self.steps >= self.n_aircraft * self.n_operations * 100000 else False
         terminated = False if self.availability.any() else True
         self.steps += 1
 
@@ -194,34 +194,38 @@ class DJSPEnv(gym.Env):
         return self.current_observation
         # return new_observation
 
-    def _calculate_reward(self, aircraft_index, function='linear', invalid=False):
+    def _calculate_reward(self, aircraft_index, function='sparse', invalid=False):
         """ Calculates the value of the reward function. """
+        reward = None
         if invalid:
-            if function == 'linear':
+            if function == 'sparse':
+                reward = 0
+            elif function == 'linear':
                 reward = self.linear_reward(self.delaydim)
             elif function == 'exponential':
                 reward = self.exponential_reward(self.delaydim)
-            return 0
+            return reward
         else:
             delay = self.delays['Aircraft Delays'][aircraft_index]
-            reward = 0
             # calculate the aircraft reward for the assigned
             if delay == 0:
                 reward = 1
             elif delay < 15:
-                # reward = self.pre_delay_reward_function(delay)
-                reward = 0.5
+                if function == 'sparse':
+                    reward = 0.5
+                elif function == 'linear' or function == 'exponential':
+                    reward = self.pre_delay_reward_function(delay)
             elif delay >= 15:
-                if function == 'linear':
-                    # reward = self.linear_reward(delay)
+                if function == 'sparse':
                     reward = 0
+                elif function == 'linear':
+                    reward = self.linear_reward(delay)
                 elif function == 'exponential':
-                    # reward = self.exponential_reward(delay)
-                    reward = 0
+                    reward = self.exponential_reward(delay)
 
             self.rewards['per aircraft'][aircraft_index] = reward
             self.rewards['total reward'] = np.sum(self.rewards['per aircraft'])
-            # return reward
+
             return reward
 
     def pre_delay_reward_function(self, delay):
@@ -490,9 +494,7 @@ class DJSPEnv(gym.Env):
 
                             # if the operation also has following operations, append to the dict list for next iteration
                             if self.operation_pointers[following_op, 1]:
-                                following_op_idxs[following_op] = self.operation_pointers[following_op, 1]
-            except RuntimeError:
-                print(following_op_idxs)
+                                next_following_ops[following_op] = self.operation_pointers[following_op, 1]
 
             # update following operation index list
             following_op_idxs = next_following_ops
