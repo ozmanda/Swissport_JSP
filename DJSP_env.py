@@ -97,20 +97,23 @@ class DJSPEnv(gym.Env):
         self.machines_per_op = [int(n) for n in lines[1].split()]
         self.n_machines = np.sum(self.machines_per_op)
 
+        # load processing time information
+        processing_times = [Timedelta(minutes=int(t)) for t in lines[2].split()]
+
+        # matrix of tasks which can be run in parallel
+        self.parallel_mask = np.empty((self.n_operations, self.n_operations), dtype=bool)
+        for idx in range(3, 3+self.n_operations):
+            self.parallel_mask[idx-3] = [int(x) for x in lines[idx].split()]
+
         # read information for each aircraft
-        for linenr in range(2, 2 + self.n_aircraft):
+        for linenr in range(3+self.n_operations, len(lines)):
             line = lines[linenr].split()
             info = {'REG': line[0],
                     'ETA': to_datetime(line[1], format='%H%M'),
                     'STD': to_datetime(line[2], format='%H%M'),
-                    'Processing Times': [Timedelta(minutes=int(t)) for t in line[3:]]}
+                    'Processing Times': processing_times}
             self.aircraft.append(info)
 
-        # matrix of tasks which can be run in parallel
-        self.parallel_mask = np.empty((self.n_operations, self.n_operations), dtype=bool)
-        s = 2 + self.n_aircraft
-        for idx in range(s, s + self.n_operations):
-            self.parallel_mask[idx - s] = [int(x) for x in lines[idx].split()]
 
     # CORE FUNCTIONS --------------------------------------------------------------------------------------------------
 
